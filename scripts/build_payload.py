@@ -64,7 +64,8 @@ def main():
             (kernel, output / 'kernel.squashfs')):
         subprocess.run(
             ['mksquashfs', str(source), str(destination), '-noappend',
-             '-comp', 'zstd', '-quiet'], check=True)
+             '-comp', 'zstd', '-all-root', '-all-time', '0',
+             '-mkfs-time', '0', '-no-xattrs', '-quiet'], check=True)
 
 
 if __name__ == '__main__':
