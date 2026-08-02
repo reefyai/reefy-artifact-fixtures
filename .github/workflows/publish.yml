@@ -11,6 +11,14 @@ on:
       digest:
         description: Published OCI manifest digest
         value: ${{ jobs.publish.outputs.digest }}
+      wrong_abi_digest:
+        value: ${{ jobs.publish.outputs.wrong_abi_digest }}
+      missing_hook_digest:
+        value: ${{ jobs.publish.outputs.missing_hook_digest }}
+      failing_hook_digest:
+        value: ${{ jobs.publish.outputs.failing_hook_digest }}
+      app_digests:
+        value: ${{ jobs.publish.outputs.app_digests }}
 
 permissions:
   contents: read
@@ -24,6 +32,10 @@ jobs:
     timeout-minutes: 30
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+      wrong_abi_digest: ${{ steps.push.outputs.wrong_abi_digest }}
+      missing_hook_digest: ${{ steps.push.outputs.missing_hook_digest }}
+      failing_hook_digest: ${{ steps.push.outputs.failing_hook_digest }}
+      app_digests: ${{ steps.push.outputs.app_digests }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,19 +62,32 @@ jobs:
       - name: Build immutable fixture payload
         run: |
           . inputs/metadata.env
-          python3 scripts/build_payload.py \
-            --module inputs/reefy_e2e_artifact.ko \
-            --kernel-release "$KERNEL_RELEASE" \
-            --reefy-build-id "$REEFY_BUILD_ID" \
-            --kernel-abi-digest "sha256:$REEFY_KERNEL_ABI_SHA256" \
-            --output output
+          for variant in good wrong-abi missing-hook failing-hook; do
+            python3 scripts/build_payload.py \
+              --module inputs/reefy_e2e_artifact.ko \
+              --kernel-release "$KERNEL_RELEASE" \
+              --reefy-build-id "$REEFY_BUILD_ID" \
+              --kernel-abi-digest "sha256:$REEFY_KERNEL_ABI_SHA256" \
+              --variant "$variant" \
+              --output "output-$variant"
+          done
+          mkdir -p output-app/root
+          printf 'shared app artifact payload\n' > output-app/root/payload
+          mksquashfs output-app/root output-app/app.squashfs \
+            -noappend -comp zstd -quiet
+          for version in 1 2 3 4; do
+            jq -n \
+              --arg version "$version" \
+              '{artifact_schema:1,kind:"app",name:"e2e-gc-fixture",version:$version,architecture:"x86_64",publisher:"reefyai"}' \
+              > "output-app/config-$version.json"
+          done
 
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
-          path: output
+          path: output-good
           format: spdx-json
-          output-file: output/sbom.spdx.json
+          output-file: output-good/sbom.spdx.json
 
       - name: Log in to GHCR
         run: echo '${{ github.token }}' | oras login ghcr.io -u '${{ github.actor }}' --password-stdin
@@ -71,23 +96,58 @@ jobs:
         id: push
         run: |
           . inputs/metadata.env
-          output_text=$(oras push \
-            "ghcr.io/reefyai/reefy-artifact-fixtures:e2e-${REEFY_BUILD_ID}" \
-            --artifact-type application/vnd.reefy.artifact.v1 \
-            --config output/config.json:application/vnd.reefy.artifact.config.v1+json \
-            output/common.squashfs:application/vnd.reefy.squashfs.v1 \
-            output/kernel.squashfs:application/vnd.reefy.squashfs.v1)
-          printf '%s\n' "$output_text"
-          digest=$(printf '%s\n' "$output_text" | sed -n 's/^Digest: //p')
-          test -n "$digest"
+          push_host() {
+            variant=$1
+            output_text=$(oras push \
+              "ghcr.io/reefyai/reefy-artifact-fixtures:e2e-${variant}-${REEFY_BUILD_ID}" \
+              --artifact-type application/vnd.reefy.artifact.v1 \
+              --config "output-${variant}/config.json:application/vnd.reefy.artifact.config.v1+json" \
+              "output-${variant}/common.squashfs:application/vnd.reefy.squashfs.v1" \
+              "output-${variant}/kernel.squashfs:application/vnd.reefy.squashfs.v1")
+            printf '%s\n' "$output_text" >&2
+            printf '%s\n' "$output_text" | sed -n 's/^Digest: //p'
+          }
+          digest=$(push_host good)
+          wrong_abi_digest=$(push_host wrong-abi)
+          missing_hook_digest=$(push_host missing-hook)
+          failing_hook_digest=$(push_host failing-hook)
+          for value in "$digest" "$wrong_abi_digest" \
+              "$missing_hook_digest" "$failing_hook_digest"; do
+            test -n "$value"
+          done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "wrong_abi_digest=$wrong_abi_digest" >> "$GITHUB_OUTPUT"
+          echo "missing_hook_digest=$missing_hook_digest" >> "$GITHUB_OUTPUT"
+          echo "failing_hook_digest=$failing_hook_digest" >> "$GITHUB_OUTPUT"
+
+          app_digests=''
+          for version in 1 2 3 4; do
+            output_text=$(oras push \
+              "ghcr.io/reefyai/reefy-artifact-fixtures:app-${version}-${REEFY_BUILD_ID}" \
+              --artifact-type application/vnd.reefy.artifact.v1 \
+              --config "output-app/config-${version}.json:application/vnd.reefy.artifact.config.v1+json" \
+              output-app/app.squashfs:application/vnd.reefy.squashfs.v1)
+            app_digest=$(printf '%s\n' "$output_text" | sed -n 's/^Digest: //p')
+            test -n "$app_digest"
+            app_digests="${app_digests}${app_digests:+,}${app_digest}"
+          done
+          echo "app_digests=$app_digests" >> "$GITHUB_OUTPUT"
           oras attach \
             --artifact-type application/spdx+json \
             "ghcr.io/reefyai/reefy-artifact-fixtures@$digest" \
-            output/sbom.spdx.json:application/spdx+json
+            output-good/sbom.spdx.json:application/spdx+json
 
       - name: Sign manifest with GitHub OIDC
-        run: cosign sign --yes "ghcr.io/reefyai/reefy-artifact-fixtures@${{ steps.push.outputs.digest }}"
+        run: |
+          for digest in \
+            '${{ steps.push.outputs.digest }}' \
+            '${{ steps.push.outputs.wrong_abi_digest }}' \
+            '${{ steps.push.outputs.missing_hook_digest }}' \
+            '${{ steps.push.outputs.failing_hook_digest }}' \
+            $(printf '%s' '${{ steps.push.outputs.app_digests }}' | tr ',' ' '); do
+            cosign sign --yes \
+              "ghcr.io/reefyai/reefy-artifact-fixtures@$digest"
+          done
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2

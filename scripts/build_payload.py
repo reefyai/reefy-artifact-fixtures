@@ -16,6 +16,9 @@ def main():
     parser.add_argument('--kernel-release', required=True)
     parser.add_argument('--reefy-build-id', required=True)
     parser.add_argument('--kernel-abi-digest', required=True)
+    parser.add_argument(
+        '--variant', choices=('good', 'wrong-abi', 'missing-hook',
+                              'failing-hook'), default='good')
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
 
@@ -27,8 +30,14 @@ def main():
     (common / 'usr/lib/reefy').mkdir(parents=True)
     module_dir = kernel / 'lib/modules' / args.kernel_release / 'extra'
     module_dir.mkdir(parents=True)
-    shutil.copy2(root / 'scripts/activate', common / 'usr/lib/reefy/activate')
-    (common / 'usr/lib/reefy/activate').chmod(0o755)
+    activator = common / 'usr/lib/reefy/activate'
+    if args.variant != 'missing-hook':
+        if args.variant == 'failing-hook':
+            activator.write_text(
+                '#!/bin/sh\necho synthetic activation failure >&2\nexit 23\n')
+        else:
+            shutil.copy2(root / 'scripts/activate', activator)
+        activator.chmod(0o755)
     shutil.copy2(args.module, module_dir / 'reefy_e2e_artifact.ko')
 
     config = {
@@ -40,9 +49,12 @@ def main():
         'publisher': 'reefyai',
         'activation_hook': 'usr/lib/reefy/activate',
         'reefy_build_id': args.reefy_build_id,
-        'kernel_abi_digest': args.kernel_abi_digest,
+        'kernel_abi_digest': (
+            'sha256:' + ('0' * 64)
+            if args.variant == 'wrong-abi' else args.kernel_abi_digest),
         'kernel_release': args.kernel_release,
         'capabilities': ['e2e.kernel-module', 'e2e.cdi'],
+        'fixture_variant': args.variant,
     }
     output.mkdir(parents=True, exist_ok=True)
     (output / 'config.json').write_text(
