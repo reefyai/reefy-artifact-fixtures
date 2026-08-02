@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+module=''
+old_ifs=$IFS
+IFS=:
+for root in ${REEFY_ARTIFACT_MOUNTS:-}; do
+    candidate=$(find "$root/lib/modules" -type f -name 'reefy_e2e_artifact.ko*' \
+        2>/dev/null | head -n1 || true)
+    if [ -n "$candidate" ]; then
+        module=$candidate
+        break
+    fi
+done
+IFS=$old_ifs
+
+if [ -z "$module" ]; then
+    echo 'fixture kernel module is missing' >&2
+    exit 21
+fi
+if [ ! -d /sys/module/reefy_e2e_artifact ]; then
+    insmod "$module"
+fi
+
+mkdir -p /run/reefy-artifact-fixture /etc/cdi
+printf '%s\n' "$REEFY_ARTIFACT_DIGEST" \
+    > /run/reefy-artifact-fixture/activated-digest
+temporary=/etc/cdi/reefy-e2e-artifact.json.tmp
+cat > "$temporary" <<'EOF'
+{
+  "cdiVersion": "0.6.0",
+  "kind": "reefy.test/artifact",
+  "devices": [
+    {
+      "name": "all",
+      "containerEdits": {
+        "env": ["REEFY_E2E_ARTIFACT=ready"]
+      }
+    }
+  ]
+}
+EOF
+mv "$temporary" /etc/cdi/reefy-e2e-artifact.json
+echo 'synthetic Reefy artifact fixture activated'
