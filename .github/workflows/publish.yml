@@ -39,10 +39,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: reefyai/reefy-artifact-fixtures
-          # Keep this aligned with the reusable-workflow ref while the
-          # reproducibility change is reviewed on its feature branch.
-          ref: artifact-fixture-reproducibility
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
 
       - uses: actions/download-artifact@v4
         with:
