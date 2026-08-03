@@ -39,8 +39,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: reefyai/reefy-artifact-fixtures
-          ref: main
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -74,13 +74,17 @@ jobs:
           mkdir -p output-app/root
           printf 'shared app artifact payload\n' > output-app/root/payload
           mksquashfs output-app/root output-app/app.squashfs \
-            -noappend -comp zstd -quiet
+            -noappend -comp zstd -all-root -all-time 0 \
+            -mkfs-time 0 -no-xattrs -quiet
           for version in 1 2 3 4; do
             jq -n \
               --arg version "$version" \
               '{artifact_schema:1,kind:"app",name:"e2e-gc-fixture",version:$version,architecture:"x86_64",publisher:"reefyai"}' \
               > "output-app/config-$version.json"
           done
+
+      - name: Test payload builder
+        run: python3 -m unittest discover -s tests
 
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
